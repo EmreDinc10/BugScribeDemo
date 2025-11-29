@@ -155,7 +155,7 @@ const draftIssue = async (payload) => {
     }
   })();
   state.lastDraft = parsed;
-  return parsed;
+  return { draft: parsed, assistantContent: reply.content };
 };
 
 const refineDraft = async (userMessage) => {
@@ -173,7 +173,7 @@ const refineDraft = async (userMessage) => {
     }
   })();
   state.lastDraft = parsed;
-  return parsed;
+  return { draft: parsed, assistantContent: reply.content };
 };
 
 const openIssuePage = async () => {
@@ -205,13 +205,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       case 'prepare-report': {
         try {
-          const draft = await draftIssue({
+          const { draft, assistantContent } = await draftIssue({
             pageContext: message.pageContext,
             storageSnapshot: message.storageSnapshot,
             performanceData: message.performanceData
           });
           await openIssuePage();
-          sendResponse({ ok: true, draft });
+          sendResponse({ ok: true, draft, assistantContent });
         } catch (err) {
           sendResponse({ ok: false, error: err.message });
         }
@@ -219,8 +219,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'refine-draft': {
         try {
-          const draft = await refineDraft(message.prompt);
-          sendResponse({ ok: true, draft });
+          const { draft, assistantContent } = await refineDraft(message.prompt);
+          sendResponse({ ok: true, draft, assistantContent });
         } catch (err) {
           sendResponse({ ok: false, error: err.message });
         }
@@ -230,6 +230,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           ok: true,
           draft: state.lastDraft,
+          assistantContent: state.chatHistory.filter((m) => m.role === 'assistant').slice(-1)[0]
+            ?.content,
           screenshots: state.screenshots.map((s) => ({
             name: `screenshot-${s.capturedAt}.png`,
             dataUrl: s.dataUrl
