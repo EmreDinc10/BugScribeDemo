@@ -98,16 +98,30 @@
     };
 
     const setDraft = (nextDraft, note) => {
-      applyDraftToForm(nextDraft);
+      if (nextDraft?.title || nextDraft?.body) {
+        applyDraftToForm(nextDraft);
+      }
       status.textContent = note || 'Draft applied to GitHub form.';
     };
 
-    if (assistantContent) {
-      addMessage('assistant', assistantContent);
-    } else {
-      addMessage('assistant', 'LLM draft applied to the GitHub form.');
-    }
-    setDraft(draft, 'Initial draft applied to GitHub form.');
+    const handleAssistantContent = (content, isInitial = false) => {
+      let parsed = content;
+      if (typeof content === 'string') {
+        try {
+          parsed = JSON.parse(content);
+        } catch (err) {
+          parsed = { type: 'chat', chat: content };
+        }
+      }
+      if (parsed?.type === 'issue_update') {
+        setDraft({ title: parsed.title, body: parsed.body }, isInitial ? 'Initial draft applied.' : 'Updated draft applied to GitHub form.');
+        addMessage('assistant', `Updated issue:\nTitle: ${parsed.title}\nBody preview: ${parsed.body.slice(0, 200)}${parsed.body.length > 200 ? '…' : ''}`);
+      } else {
+        addMessage('assistant', parsed?.chat || 'Chat response.');
+      }
+    };
+
+    handleAssistantContent(assistantContent, true);
 
     resetBtn.addEventListener('click', () => {
       setDraft(draft, 'Reset to initial draft and applied.');
@@ -127,8 +141,7 @@
         prompt
       });
       if (response?.ok) {
-        addMessage('assistant', response.assistantContent || 'Updated the draft.');
-        setDraft(response.draft, 'Updated draft applied to GitHub form.');
+        handleAssistantContent(response.assistantContent);
       } else {
         status.textContent = `LLM failed: ${response?.error || 'unknown error'}`;
       }

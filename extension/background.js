@@ -81,7 +81,7 @@ const ensureKey = () => {
   }
 };
 
-const callLLM = async (messages) => {
+const callLLM = async (messages, { jsonMode = false } = {}) => {
   ensureKey();
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -92,7 +92,8 @@ const callLLM = async (messages) => {
     body: JSON.stringify({
       model: 'gpt-4o-mini',
       temperature: 0.3,
-      messages
+      messages,
+      ...(jsonMode ? { response_format: { type: 'json_object' } } : {})
     })
   });
   if (!response.ok) {
@@ -109,10 +110,11 @@ const buildPrompt = (payload) => {
   const system = {
     role: 'system',
     content: [
-      'You are preparing a concise GitHub issue for a bug report.',
-      'Return JSON with keys: title, body. Body should be Markdown.',
-      'Body sections: Summary, Steps to Reproduce, Expected Result, Actual Result, Console, Network, User Actions, Screenshots, Environment.',
-      'Keep it short but concrete. Include bullet lists.'
+      'You prepare GitHub issue drafts and chat responses.',
+      'Always respond with a single JSON object, no code fences, no extra text.',
+      'If updating the issue, respond with {"type":"issue_update","title":"...","body":"..."} where body is Markdown with sections: Summary, Steps to Reproduce, Expected Result, Actual Result, Console, Network, User Actions, Screenshots, Environment. Keep concise bullet points.',
+      'If the user is just chatting or you cannot update, respond with {"type":"chat","chat":"..."}',
+      'Do not wrap the JSON in Markdown.'
     ].join(' ')
   };
 
@@ -135,7 +137,8 @@ const buildPrompt = (payload) => {
       safeJSON(storageSnapshot, 4000),
       `Performance:`,
       safeJSON(performanceData, 2000),
-      `Screenshots (filenames, already downloaded): ${screenshotNotes.join(', ') || 'none'}`
+      `Screenshots (filenames, already downloaded): ${screenshotNotes.join(', ') || 'none'}`,
+      `Task: produce an issue_update JSON with title/body for the bug above.`
     ].join('\n')
   };
 
@@ -145,35 +148,42 @@ const buildPrompt = (payload) => {
 const draftIssue = async (payload) => {
   const messages = buildPrompt(payload);
   state.chatHistory = [...messages];
-  const reply = await callLLM(messages);
+  const reply = await callLLM(messages, { jsonMode: true });
   state.chatHistory.push(reply);
   const parsed = (() => {
     try {
       return JSON.parse(reply.content);
     } catch (err) {
-      return { title: 'Bug report', body: reply.content };
+      return { type: 'chat', chat: reply.content };
     }
   })();
-  state.lastDraft = parsed;
-  return { draft: parsed, assistantContent: reply.content };
+  if (parsed.type === 'issue_update') {
+    state.lastDraft = { title: parsed.title, body: parsed.body };
+  }
+  return { draft: state.lastDraft, assistantContent: parsed };
 };
 
 const refineDraft = async (userMessage) => {
   if (!state.chatHistory.length && state.lastDraft) {
-    state.chatHistory.push({ role: 'assistant', content: JSON.stringify(state.lastDraft) });
+    state.chatHistory.push({
+      role: 'assistant',
+      content: JSON.stringify({ type: 'issue_update', ...state.lastDraft })
+    });
   }
   state.chatHistory.push({ role: 'user', content: userMessage });
-  const reply = await callLLM(state.chatHistory);
+  const reply = await callLLM(state.chatHistory, { jsonMode: true });
   state.chatHistory.push(reply);
   const parsed = (() => {
     try {
       return JSON.parse(reply.content);
     } catch (err) {
-      return { title: state.lastDraft?.title || 'Bug report', body: reply.content };
+      return { type: 'chat', chat: reply.content };
     }
   })();
-  state.lastDraft = parsed;
-  return { draft: parsed, assistantContent: reply.content };
+  if (parsed.type === 'issue_update') {
+    state.lastDraft = { title: parsed.title, body: parsed.body };
+  }
+  return { draft: state.lastDraft, assistantContent: parsed };
 };
 
 const openIssuePage = async () => {
@@ -230,8 +240,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           ok: true,
           draft: state.lastDraft,
-          assistantContent: state.chatHistory.filter((m) => m.role === 'assistant').slice(-1)[0]
-            ?.content,
+          assistantContent: state.chatHistory
+            .filter((m) => m.role === 'assistant')
+            .slice(-1)[0]?.content,
           screenshots: state.screenshots.map((s) => ({
             name: `screenshot-${s.capturedAt}.png`,
             dataUrl: s.dataUrl
