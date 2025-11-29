@@ -1,16 +1,45 @@
 (() => {
-  const applyDraftToForm = (draft) => {
-    const titleField = document.querySelector('#issue_title');
-    const bodyField = document.querySelector('#issue_body');
-    if (titleField) {
-      titleField.value = draft?.title || '';
-      titleField.dispatchEvent(new Event('input', { bubbles: true }));
-      titleField.dispatchEvent(new Event('change', { bubbles: true }));
+  const isVisible = (el) => {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    return style && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+
+  const selectFirstVisible = (selectors) => {
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      if (el && isVisible(el)) return el;
     }
-    if (bodyField) {
-      bodyField.value = draft?.body || '';
-      bodyField.dispatchEvent(new Event('input', { bubbles: true }));
-      bodyField.dispatchEvent(new Event('change', { bubbles: true }));
+    return null;
+  };
+
+  const findFields = () => {
+    const title = selectFirstVisible([
+      '#issue_title',
+      'input[aria-label="Add a title"]',
+      'input[placeholder="Title"]',
+      'input[aria-label="Title"]'
+    ]);
+    const body = selectFirstVisible([
+      '#issue_body',
+      'textarea[aria-label="Markdown value"]',
+      'textarea[placeholder="Type your description here…"]',
+      'textarea[placeholder="Type your description here..."]'
+    ]);
+    return { title, body };
+  };
+
+  const applyDraftToForm = (draft) => {
+    const { title, body } = findFields();
+    if (title) {
+      title.value = draft?.title || '';
+      title.dispatchEvent(new Event('input', { bubbles: true }));
+      title.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    if (body) {
+      body.value = draft?.body || '';
+      body.dispatchEvent(new Event('input', { bubbles: true }));
+      body.dispatchEvent(new Event('change', { bubbles: true }));
     }
   };
 
