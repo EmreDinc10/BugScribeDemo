@@ -35,5 +35,11 @@
       "css": ["content/ui.css"],
       "run_at": "document_idle"
     }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content/console-hook.js"],
+      "matches": ["https://bug-scribe-airlines.vercel.app/*"]
+    }
   ]
 }
