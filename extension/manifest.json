@@ -1,0 +1,39 @@
+{
+  "name": "BugScribe Reporter",
+  "description": "Capture recent console/network data, rewind screenshots, and draft GitHub issues with an LLM.",
+  "version": "0.1.0",
+  "manifest_version": 3,
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "scripting",
+    "storage",
+    "downloads",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://bug-scribe-airlines.vercel.app/*",
+    "https://github.com/EmreDinc10/BugScribeAirlines/*",
+    "https://api.openai.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "BugScribe Reporter"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://bug-scribe-airlines.vercel.app/*"],
+      "js": ["content/recorder.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://github.com/EmreDinc10/BugScribeAirlines/issues/new*"],
+      "js": ["content/github-issue.js"],
+      "css": ["content/ui.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

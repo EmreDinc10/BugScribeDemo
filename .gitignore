@@ -1,0 +1,6 @@
+.DS_Store
+node_modules/
+extension/config.js
+extension/dist/
+extension/.DS_Store
+.env

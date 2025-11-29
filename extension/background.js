@@ -1,0 +1,244 @@
+import { OPENAI_API_KEY } from './config.js';
+
+const MAX_LOGS = 200;
+const MAX_NETWORK = 200;
+const MAX_INTERACTIONS = 200;
+const MAX_DOM = 50;
+const MAX_SCREENSHOTS = 2;
+
+const state = {
+  consoleLogs: [],
+  networkLogs: [],
+  interactions: [],
+  domSnapshots: [],
+  screenshots: [],
+  lastDraft: null,
+  chatHistory: []
+};
+
+let trackedTabId = null;
+let issueTabId = null;
+
+const trimPush = (bucket, entry, cap) => {
+  bucket.push(entry);
+  if (bucket.length > cap) {
+    bucket.shift();
+  }
+};
+
+const captureScreenshot = async () => {
+  if (trackedTabId === null) return;
+  try {
+    const tab = await chrome.tabs.get(trackedTabId);
+    if (!tab.active) return;
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+    const shot = { dataUrl, capturedAt: Date.now() };
+    trimPush(state.screenshots, shot, MAX_SCREENSHOTS);
+    // Save locally to avoid extra backend handling.
+    chrome.downloads.download({
+      url: dataUrl,
+      filename: `bugscribe/screenshot-${shot.capturedAt}.png`,
+      saveAs: false
+    });
+  } catch (err) {
+    console.error('capture screenshot failed', err);
+  }
+};
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'bugscribe-capture') {
+    await captureScreenshot();
+  }
+});
+
+const startCapture = (tabId) => {
+  trackedTabId = tabId;
+  chrome.alarms.create('bugscribe-capture', { periodInMinutes: 0.0833 }); // ~5s
+};
+
+const stopCapture = (tabId) => {
+  if (trackedTabId === tabId) {
+    trackedTabId = null;
+    chrome.alarms.clear('bugscribe-capture');
+  }
+};
+
+chrome.tabs.onRemoved.addListener((tabId) => stopCapture(tabId));
+
+const safeJSON = (value, limit = 5000) => {
+  try {
+    const str = typeof value === 'string' ? value : JSON.stringify(value);
+    if (str.length > limit) return `${str.slice(0, limit)}...[truncated ${str.length - limit}]`;
+    return str;
+  } catch (err) {
+    return String(value);
+  }
+};
+
+const ensureKey = () => {
+  if (!OPENAI_API_KEY) {
+    throw new Error('Missing OPENAI_API_KEY in extension/config.js');
+  }
+};
+
+const callLLM = async (messages) => {
+  ensureKey();
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${OPENAI_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      temperature: 0.3,
+      messages
+    })
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`LLM error ${response.status}: ${body}`);
+  }
+  const data = await response.json();
+  return data.choices[0].message;
+};
+
+const buildPrompt = (payload) => {
+  const { pageContext, storageSnapshot, performanceData } = payload;
+  const screenshotNotes = state.screenshots.map((s) => `screenshot-${s.capturedAt}.png`);
+  const system = {
+    role: 'system',
+    content: [
+      'You are preparing a concise GitHub issue for a bug report.',
+      'Return JSON with keys: title, body. Body should be Markdown.',
+      'Body sections: Summary, Steps to Reproduce, Expected Result, Actual Result, Console, Network, User Actions, Screenshots, Environment.',
+      'Keep it short but concrete. Include bullet lists.'
+    ].join(' ')
+  };
+
+  const user = {
+    role: 'user',
+    content: [
+      `Page: ${pageContext.url}`,
+      `Viewport: ${pageContext.viewport.width}x${pageContext.viewport.height}`,
+      `User agent: ${pageContext.userAgent}`,
+      `Captured at: ${new Date().toISOString()}`,
+      `Recent console (${state.consoleLogs.length}):`,
+      safeJSON(state.consoleLogs.slice(-20)),
+      `Recent network (${state.networkLogs.length}):`,
+      safeJSON(state.networkLogs.slice(-20)),
+      `Recent interactions (${state.interactions.length}):`,
+      safeJSON(state.interactions.slice(-15)),
+      `DOM snapshot:`,
+      safeJSON(state.domSnapshots.slice(-5)),
+      `Storage snapshot:`,
+      safeJSON(storageSnapshot, 4000),
+      `Performance:`,
+      safeJSON(performanceData, 2000),
+      `Screenshots (filenames, already downloaded): ${screenshotNotes.join(', ') || 'none'}`
+    ].join('\n')
+  };
+
+  return [system, user];
+};
+
+const draftIssue = async (payload) => {
+  const messages = buildPrompt(payload);
+  state.chatHistory = [...messages];
+  const reply = await callLLM(messages);
+  state.chatHistory.push(reply);
+  const parsed = (() => {
+    try {
+      return JSON.parse(reply.content);
+    } catch (err) {
+      return { title: 'Bug report', body: reply.content };
+    }
+  })();
+  state.lastDraft = parsed;
+  return parsed;
+};
+
+const refineDraft = async (userMessage) => {
+  if (!state.chatHistory.length && state.lastDraft) {
+    state.chatHistory.push({ role: 'assistant', content: JSON.stringify(state.lastDraft) });
+  }
+  state.chatHistory.push({ role: 'user', content: userMessage });
+  const reply = await callLLM(state.chatHistory);
+  state.chatHistory.push(reply);
+  const parsed = (() => {
+    try {
+      return JSON.parse(reply.content);
+    } catch (err) {
+      return { title: state.lastDraft?.title || 'Bug report', body: reply.content };
+    }
+  })();
+  state.lastDraft = parsed;
+  return parsed;
+};
+
+const openIssuePage = async () => {
+  const tab = await chrome.tabs.create({
+    url: 'https://github.com/EmreDinc10/BugScribeAirlines/issues/new'
+  });
+  issueTabId = tab.id;
+  return tab;
+};
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  (async () => {
+    switch (message.type) {
+      case 'page-active':
+        startCapture(sender.tab.id);
+        sendResponse({ ok: true });
+        break;
+      case 'console-log':
+        trimPush(state.consoleLogs, { ...message.payload, at: Date.now() }, MAX_LOGS);
+        break;
+      case 'network-log':
+        trimPush(state.networkLogs, { ...message.payload, at: Date.now() }, MAX_NETWORK);
+        break;
+      case 'interaction-log':
+        trimPush(state.interactions, { ...message.payload, at: Date.now() }, MAX_INTERACTIONS);
+        break;
+      case 'dom-snapshot':
+        trimPush(state.domSnapshots, { ...message.payload, at: Date.now() }, MAX_DOM);
+        break;
+      case 'prepare-report': {
+        try {
+          const draft = await draftIssue({
+            pageContext: message.pageContext,
+            storageSnapshot: message.storageSnapshot,
+            performanceData: message.performanceData
+          });
+          await openIssuePage();
+          sendResponse({ ok: true, draft });
+        } catch (err) {
+          sendResponse({ ok: false, error: err.message });
+        }
+        break;
+      }
+      case 'refine-draft': {
+        try {
+          const draft = await refineDraft(message.prompt);
+          sendResponse({ ok: true, draft });
+        } catch (err) {
+          sendResponse({ ok: false, error: err.message });
+        }
+        break;
+      }
+      case 'issue-page-ready':
+        sendResponse({
+          ok: true,
+          draft: state.lastDraft,
+          screenshots: state.screenshots.map((s) => ({
+            name: `screenshot-${s.capturedAt}.png`,
+            dataUrl: s.dataUrl
+          }))
+        });
+        break;
+      default:
+        break;
+    }
+  })();
+  return true;
+});
