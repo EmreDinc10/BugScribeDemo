@@ -13,11 +13,58 @@ const state = {
   domSnapshots: [],
   screenshots: [],
   lastDraft: null,
-  chatHistory: []
+  chatHistory: [],
+  isLogging: true
 };
 
 let trackedTabId = null;
 let issueTabId = null;
+
+// -------------------- Network Capture --------------------
+if (chrome.webRequest) {
+  // Before request
+  chrome.webRequest.onBeforeRequest.addListener((details) => {
+    if (!state.isLogging) return;
+    const logEntry = {
+      id: details.requestId,
+      url: details.url,
+      method: details.method,
+      type: details.type,
+      timestamp: details.timeStamp,
+      time: new Date(details.timeStamp).toISOString(),
+      frameId: details.frameId,
+      parentFrameId: details.parentFrameId
+    };
+    trimPush(state.networkLogs, logEntry, MAX_NETWORK);
+  }, { urls: ["<all_urls>"] });
+
+  // Before send headers
+  chrome.webRequest.onBeforeSendHeaders.addListener((details) => {
+    const idx = state.networkLogs.findIndex(log => log.id === details.requestId);
+    if (idx !== -1) state.networkLogs[idx].requestHeaders = details.requestHeaders || [];
+  }, { urls: ["<all_urls>"] }, ["requestHeaders", "extraHeaders"]);
+
+  // Completed
+  chrome.webRequest.onCompleted.addListener((details) => {
+    const idx = state.networkLogs.findIndex(log => log.id === details.requestId);
+    if (idx !== -1) {
+      state.networkLogs[idx].responseStatusCode = details.statusCode;
+      state.networkLogs[idx].responseHeaders = details.responseHeaders || [];
+    }
+  }, { urls: ["<all_urls>"] }, ["responseHeaders", "extraHeaders"]);
+
+  // Error
+  chrome.webRequest.onErrorOccurred.addListener((details) => {
+    const idx = state.networkLogs.findIndex(log => log.id === details.requestId);
+    if (idx !== -1) state.networkLogs[idx].error = details.error;
+  }, { urls: ["<all_urls>"] });
+}
+
+setInterval(() => {
+  const cutoff = Date.now() - 60000;
+  state.networkLogs = state.networkLogs.filter(log => log.timestamp > cutoff);
+  state.consoleLogs = state.consoleLogs.filter(log => log.timestamp > cutoff);
+}, 5000);
 
 const trimPush = (bucket, entry, cap) => {
   bucket.push(entry);
@@ -201,11 +248,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         startCapture(sender.tab.id);
         sendResponse({ ok: true });
         break;
-      case 'console-log':
-        trimPush(state.consoleLogs, { ...message.payload, at: Date.now() }, MAX_LOGS);
+      case 'get-console-logs':
+        sendResponse({ logs: state.consoleLogs });
         break;
-      case 'network-log':
-        trimPush(state.networkLogs, { ...message.payload, at: Date.now() }, MAX_NETWORK);
+      case 'get-network-logs':
+        sendResponse({ logs: state.networkLogs });
+        break;
+      case 'log-console-entry':
+        if (message.payload) {
+          trimPush(state.consoleLogs, { ...message.payload }, MAX_LOGS);
+          console.log(
+            '%c[COLLECTOR] CONSOLE:',
+            'color:purple;font-weight:bold;',
+            message.payload
+          );
+        }
+        sendResponse({ ok: true });
         break;
       case 'interaction-log':
         trimPush(state.interactions, { ...message.payload, at: Date.now() }, MAX_INTERACTIONS);
