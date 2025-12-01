@@ -75,10 +75,20 @@
     const resetBtn = document.createElement('button');
     resetBtn.textContent = 'Reset to initial';
     buttons.append(sendBtn, resetBtn);
+
+    const downloadNetBtn = document.createElement('button');
+    downloadNetBtn.textContent = 'Download Network Logs';
+    buttons.appendChild(downloadNetBtn);
+
+    const downloadConBtn = document.createElement('button');
+    downloadConBtn.textContent = 'Download Console Logs';
+    buttons.appendChild(downloadConBtn);
+    
     main.appendChild(buttons);
 
     root.appendChild(main);
     document.body.appendChild(root);
+
 
     const messages = [];
     const renderLog = () => {
@@ -103,6 +113,34 @@
       }
       status.textContent = note || 'Draft applied to GitHub form.';
     };
+
+    downloadConBtn.addEventListener('click', async () => {
+    chrome.runtime.sendMessage({ type: 'get-console-logs' }, (response) => {
+        const dataStr = JSON.stringify(response.logs, null, 2);
+        const blob = new Blob([dataStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'console-logs.json';
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+    });
+
+    downloadNetBtn.addEventListener('click', async () => {
+      chrome.runtime.sendMessage({ type: 'get-network-logs' }, (response) => {
+        const dataStr = JSON.stringify(response.logs, null, 2);
+        const blob = new Blob([dataStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'network-logs.json';
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+    });
 
     const handleAssistantContent = (content, isInitial = false) => {
       let parsed = content;
@@ -150,6 +188,40 @@
     });
   };
 
+  const attachLogs = (logs, filename, statusText) => {
+    if (!logs || logs.length === 0) return;
+
+    // 1. Create the virtual file
+    const jsonString = JSON.stringify(logs, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json' });
+    const file = new File([blob], filename, { type: 'application/json' });
+
+    // 2. Prepare the DataTransfer
+    const dt = new DataTransfer();
+    dt.items.add(file);
+
+    // 3. Find the drop target
+    const { body: dropZone } = findFields();
+    if (!dropZone) {
+      console.error(`BugScribe: Could not find text area to drop ${filename}`);
+      return;
+    }
+
+    // 4. Simulate drag & drop
+    ['dragenter', 'dragover', 'drop'].forEach((eventType) => {
+      const event = new DragEvent(eventType, {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: dt
+      });
+      dropZone.dispatchEvent(event);
+    });
+
+    // 5. Update overlay status
+    const status = document.querySelector('#bugscribe-overlay small');
+    if (status) status.textContent = statusText;
+  };
+
   const init = async () => {
     const response = await chrome.runtime.sendMessage({ type: 'issue-page-ready' });
     if (!response?.ok) return;
@@ -158,7 +230,22 @@
       assistantContent: response.assistantContent,
       screenshots: response.screenshots || []
     });
-  };
+
+    // --- THIS IS THE PART THAT TRIGGERS THE AUTOMATIC UPLOAD ---
+    // Attach network logs
+    chrome.runtime.sendMessage({ type: 'get-network-logs' }, (resp) => {
+      if (resp?.logs) {
+        attachLogs(resp.logs, 'network_logs.json', 'Network logs uploaded via drop...');
+      }
+    });
+
+    // Attach console logs
+    chrome.runtime.sendMessage({ type: 'get-console-logs' }, (resp) => {
+      if (resp?.logs) {
+        attachLogs(resp.logs, 'console_logs.json', 'Console logs uploaded via drop...');
+      }
+    });
+    };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
